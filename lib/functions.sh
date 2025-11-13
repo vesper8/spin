@@ -702,6 +702,18 @@ last_pull_timestamp() {
     grep "^$escaped_project_dir " "$cache_file" | awk '{print $2}'
 }
 
+escape_sed_pattern() {
+    # Escape special characters for use in sed search patterns
+    # This ensures exact string matching by escaping regex metacharacters
+    printf '%s' "$1" | sed 's/[][\.|$(){}?+*^/]/\\&/g'
+}
+
+escape_sed_replacement() {
+    # Escape special characters for use in sed replacement strings
+    # In replacement strings, we need to escape: \ / &
+    printf '%s' "$1" | sed 's/[\/&]/\\&/g' | sed 's/\\/\\\\/g'
+}
+
 line_in_file() {
     local action="ensure"
     local files=()
@@ -793,7 +805,12 @@ ${args[1]}" "$file"
                     return 1
                 fi
                 if grep -qF -- "${args[0]}" "$file"; then
-                    sed_inplace "s/${args[0]}/${args[1]}/g" "$file"
+                    # Escape special regex characters for exact matching
+                    local escaped_search
+                    local escaped_replace
+                    escaped_search=$(escape_sed_pattern "${args[0]}")
+                    escaped_replace=$(escape_sed_replacement "${args[1]}")
+                    sed_inplace "s/${escaped_search}/${escaped_replace}/g" "$file"
                 else
                     if [[ "$ignore_missing" == true ]]; then
                         return 0
@@ -1139,6 +1156,58 @@ prompt_to_encrypt_files(){
     fi
 }
 
+log_ansible_command() {
+  local log_dir="$HOME/.spin/logs"
+  local log_file="$log_dir/ansible-commands.log"
+  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  # Create log directory if it doesn't exist
+  if [[ ! -d "$log_dir" ]]; then
+    mkdir -p "$log_dir"
+  fi
+  
+  # Build the full command string
+  local full_command="ansible"
+  for arg in "$@"; do
+    # Quote arguments that contain spaces or special characters
+    if [[ "$arg" =~ [[:space:]] ]] || [[ "$arg" =~ [\$\`\"] ]]; then
+      full_command="$full_command \"$arg\""
+    else
+      full_command="$full_command $arg"
+    fi
+  done
+  
+  # Log the command with timestamp and context
+  {
+    echo "================================================================================"
+    echo "Timestamp: $timestamp"
+    echo "Working Directory: $(pwd)"
+    echo "Command: $full_command"
+    echo "--------------------------------------------------------------------------------"
+    echo "Full Docker Command:"
+    echo "docker run --rm -it \\"
+    echo "  -e \"PUID=${SPIN_USER_ID}\" \\"
+    echo "  -e \"PGID=${SPIN_GROUP_ID}\" \\"
+    echo "  -e \"RUN_AS_USER=${SPIN_RUN_AS_USER}\" \\"
+    
+    # Log additional docker args if they would be added
+    if [[ -n "${SPIN_ANSIBLE_COLLECTIONS_PATH:-}" ]] && [[ -d "$SPIN_ANSIBLE_COLLECTIONS_PATH" ]]; then
+      echo "  -v \"$SPIN_ANSIBLE_COLLECTIONS_PATH:/etc/ansible/collections\" \\"
+    fi
+    
+    echo "  \"${SPIN_ANSIBLE_IMAGE}\" \\"
+    echo "  $full_command"
+    echo "================================================================================"
+    echo ""
+  } >> "$log_file"
+  
+  # Also log to a dated file for easier searching
+  local dated_log_file="$log_dir/ansible-commands-$(date '+%Y-%m-%d').log"
+  {
+    echo "[$timestamp] $full_command"
+  } >> "$dated_log_file"
+}
+
 run_ansible() {
   local additional_docker_args=()
   local ansible_args=()
@@ -1148,6 +1217,7 @@ run_ansible() {
   local set_env=false
   local debug=${SPIN_DEBUG:-false}
   SPIN_FORCE_INSTALL_GALAXY_DEPS=${SPIN_FORCE_INSTALL_GALAXY_DEPS:-false}
+  SPIN_LOG_ANSIBLE=${SPIN_LOG_ANSIBLE:-true}
   # List of environment variables that can be forwarded to Ansible container
   local env_vars_to_forward=(
     "HCLOUD_TOKEN"
@@ -1188,6 +1258,11 @@ run_ansible() {
         ;;
     esac
   done
+  
+  # Log Ansible command if enabled
+  if [[ "$SPIN_LOG_ANSIBLE" == "true" ]]; then
+    log_ansible_command "${ansible_args[@]}"
+  fi
 
   if [[ "$allow_ssh" == true ]]; then
     additional_docker_args+=("-v" "$HOME/.ssh/:/ssh/:ro" "-v" "$HOME/.ssh/known_hosts:/ssh/known_hosts:rw")
@@ -1504,4 +1579,145 @@ validate_spin_yml() {
   fi
 
   return 0
+}
+
+# -----------------------------
+# Spin logging v2 (per-invocation folders)
+# Each invocation creates ~/.spin/logs/&lt;command&gt;-&lt;timestamp&gt;/ with logs inside.
+# -----------------------------
+
+# Return a per-command, per-run log directory path (and create it)
+_spin_make_log_dir() {
+  local name="$1"
+  local ts
+  ts=$(date +%Y%m%d%H%M%S)
+  local base="${HOME}/.spin/logs"
+  local dir="${base}/${name}-${ts}"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+# Quote args for readable, copy/paste-able logging
+_spin_quote_args() {
+  local out=()
+  local a
+  for a in "$@"; do
+    out+=("$(printf '%q' "$a")")
+  done
+  printf "%s" "${out[*]}"
+}
+
+# Log a docker command invocation into its own folder and return the folder
+# Folder example: ~/.spin/logs/docker-stack-deploy-20250101123045/
+log_docker_command() {
+  local args=("$@")
+  local sub1=""
+  local sub2=""
+
+  # Parse first non-option token as subcommand (e.g. stack, service, image, run, compose)
+  local i=0
+  while (( i < ${#args[@]} )); do
+    local tok="${args[$i]}"
+    if [[ "$tok" == "--" ]]; then ((i++)); break; fi
+    if [[ "$tok" == -* ]]; then ((i++)); continue; fi
+    sub1="$tok"; ((i++))
+    # If we have a second-level subcommand (e.g. stack deploy), capture it
+    while (( i < ${#args[@]} )) && [[ "${args[$i]}" == -* ]]; do ((i++)); done
+    if (( i < ${#args[@]} )); then sub2="${args[$i]}"; fi
+    break
+  done
+
+  local name="docker"
+  if [[ -n "$sub1" ]]; then
+    name="${name}-${sub1}"
+  fi
+  # Include second-level only when it's an actual subcommand (avoid docker run <image>)
+  if [[ -n "$sub2" && "$sub1" != "run" ]]; then
+    name="${name}-${sub2}"
+  fi
+
+  local dir
+  dir=$(_spin_make_log_dir "$name")
+  local cmdline="docker $(_spin_quote_args "${args[@]}")"
+
+  {
+    echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Working Directory: $(pwd)"
+    echo "Command: $cmdline"
+  } > "$dir/command.txt"
+
+  echo "$dir"
+}
+
+# Execute docker while logging invocation and capturing stdout/stderr to files
+run_docker_logged() {
+  local start_ts
+  start_ts=$(date +%s)
+
+  local dir
+  dir=$(log_docker_command "$@")
+
+  # Stream output to console while tee-ing to files
+  command docker "$@" \
+    > >(tee -a "$dir/stdout.log") \
+    2> >(tee -a "$dir/stderr.log" >&2)
+  local rc=$?
+
+  local end_ts
+  end_ts=$(date +%s)
+  local duration=$((end_ts - start_ts))
+
+  {
+    echo "ExitCode: $rc"
+    echo "DurationSeconds: $duration"
+  } >> "$dir/command.txt"
+
+  # Also write a combined log for convenience
+  # (stderr appended after stdout to preserve primary stream)
+  if [[ -s "$dir/stdout.log" ]]; then cat "$dir/stdout.log" > "$dir/combined.log"; fi
+  if [[ -s "$dir/stderr.log" ]]; then cat "$dir/stderr.log" >> "$dir/combined.log"; fi
+
+  return $rc
+}
+
+# Global docker wrapper to log every docker invocation
+docker() {
+  run_docker_logged "$@"
+}
+
+# Per-invocation Ansible logger (folder example: ~/.spin/logs/ansible-playbook-20250101123045/)
+# Called by run_ansible() before the container is executed.
+log_ansible_command() {
+  local args=("$@")
+  local cmd="${args[0]:-ansible}"
+  local base_name="${cmd##*/}"
+  base_name="${base_name:-ansible}"
+
+  local dir
+  dir=$(_spin_make_log_dir "$base_name")
+
+  local cmdline="$(_spin_quote_args "${args[@]}")"
+
+  {
+    echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Working Directory: $(pwd)"
+    echo "Command: $cmdline"
+  } > "$dir/command.txt"
+
+  # Best-effort: include a representative docker run line for context.
+  # The actual docker invocation (with exact args) will be captured by the docker() wrapper above.
+  {
+    echo "docker run --rm -it \\"
+    echo "  -e \"PUID=${SPIN_USER_ID}\" \\"
+    echo "  -e \"PGID=${SPIN_GROUP_ID}\" \\"
+    echo "  -e \"RUN_AS_USER=${SPIN_RUN_AS_USER}\" \\"
+    if [[ -n "${SPIN_ANSIBLE_COLLECTIONS_PATH:-}" && -d "$SPIN_ANSIBLE_COLLECTIONS_PATH" ]]; then
+      echo "  -v \"$SPIN_ANSIBLE_COLLECTIONS_PATH:/etc/ansible/collections\" \\"
+    fi
+    echo "  \"${SPIN_ANSIBLE_IMAGE}\" \\"
+    echo "  $cmdline"
+  } > "$dir/docker-run-example.txt"
+
+  # Expose last directory path for any caller that wants to append additional data
+  export SPIN_LAST_ANSIBLE_LOG_DIR="$dir"
 }

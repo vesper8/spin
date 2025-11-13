@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 action_provision(){
     validate_spin_yml
-
+    
+    # Enable Ansible logging
+    export SPIN_LOG_ANSIBLE=true
+    
+    echo "${BOLD}${BLUE}📝 Ansible commands will be logged to: ~/.spin/logs/ansible-commands.log${RESET}"
     echo "Preparing Ansible run..." >&2
     prepare_ansible_run "$@"
 

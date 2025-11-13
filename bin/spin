@@ -153,6 +153,7 @@ if [ $# -gt 0 ]; then
     ;;
     run)
       source "$SPIN_HOME/lib/actions/run.sh"
+      echo "$@"
       action_run "$@"
     ;;
     stop)
@@ -175,6 +176,14 @@ if [ $# -gt 0 ]; then
       source "$SPIN_HOME/lib/actions/version.sh"
       action_version
     ;;
+    buildCustom)
+      source "$SPIN_HOME/lib/actions/buildCustom.sh"
+      action_buildCustom "$@"
+    ;;
+    saveCustom)
+      source "$SPIN_HOME/lib/actions/saveCustom.sh"
+      action_saveCustom "$@"
+    ;;    
     *)
       echo "\"$spin_action\" is not a valid command. Below are the commands available."
       source "$SPIN_HOME/lib/actions/help.sh"
