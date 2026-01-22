@@ -60,9 +60,8 @@ action_saveCustom() {
         echo ""
     fi
     
-    # Generate timestamp and output filename
-    timestamp=$(date +%Y%m%d-%H%M%S)
-    output_file="${output_dir}/${vendor_name}-${timestamp}.tar"
+    # Generate output filename
+    output_file="${output_dir}/${vendor_name}-${image_tag}.tar"
     
     echo "🔍 Scanning for Docker images to save..."
     echo "📁 Current directory: $(pwd)"

@@ -83,8 +83,7 @@ build_images_only() {
         # Generate image name
         full_docker_image_name="${image_prefix}/$(echo "$dockerfile" | tr '[:upper:]' '[:lower:]')"
         versioned_image="${full_docker_image_name}:${image_tag}"
-        latest_image="${full_docker_image_name}:latest"
-        
+
         echo "🔨 Building Docker image '$versioned_image' from '$dockerfile'..."
         echo "📋 Build context: $(pwd)"
         echo "🚫 .dockerignore: $([ -f .dockerignore ] && echo "Active" || echo "None")"
@@ -94,7 +93,6 @@ build_images_only() {
         echo "🚀 Starting build (you'll see what files are being processed)..."
         if docker buildx build --platform "$build_platform" \
             -t "$versioned_image" \
-            -t "$latest_image" \
             -f "$dockerfile" \
             --load \
             --progress=plain \
